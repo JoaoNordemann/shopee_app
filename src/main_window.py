@@ -57,27 +57,38 @@ TAMANHO_PAGINA = 50  # quantos cards existem como widget ao mesmo tempo
 
 
 # ---------------------------------------------------------------------------
-# Widget que avisa quando é redimensionado (usado pra recalcular colunas)
+# QScrollArea que avisa quando é redimensionada (usado pra recalcular colunas)
 # ---------------------------------------------------------------------------
 
 
-class _AreaProdutosWidget(QWidget):
+class _AreaProdutosScrollArea(QScrollArea):
     """
-    QWidget comum, só que emite um sinal com a nova largura sempre que é
-    redimensionado. Como este widget é o próprio conteúdo do QScrollArea
-    (com setWidgetResizable(True)), sua largura é ajustada automaticamente
-    para acompanhar a largura visível da área rolável — então capturar o
-    resizeEvent DELE é a forma mais direta e confiável de saber quando a
-    largura disponível pro grid mudou (mais confiável do que capturar o
-    resize da janela principal, que pode disparar antes do layout interno
-    terminar de se ajustar).
+    QScrollArea comum, só que emite um sinal com a largura do VIEWPORT
+    sempre que é redimensionada.
+
+    IMPORTANTE (correção de bug): antes, a detecção de resize era feita
+    no widget de CONTEÚDO (dentro da área rolável). O problema é que,
+    com setWidgetResizable(True), o Qt não deixa o conteúdo encolher
+    abaixo do tamanho mínimo exigido pelo QGridLayout — e esse mínimo é
+    justamente "largura suficiente para as N colunas já colocadas".
+    Resultado: aumentar a janela funcionava (o conteúdo cresce livre),
+    mas diminuir não (o conteúdo ficava preso no mínimo da última
+    quantidade de colunas, então o resizeEvent nunca chegava a reportar
+    uma largura menor).
+
+    A correção é observar o resize do VIEWPORT da QScrollArea (a área
+    visível de verdade, controlada pela janela/layout externo — não pelo
+    conteúdo), que encolhe e cresce livremente independente do que está
+    dentro. A barra de rolagem horizontal fica desativada de propósito
+    (ver _criar_area_produtos) para nunca aparecer durante o instante de
+    recálculo de colunas.
     """
 
-    redimensionado = Signal(int)  # nova largura, em pixels
+    redimensionado = Signal(int)  # nova largura do viewport, em pixels
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (nome exigido pelo Qt)
         super().resizeEvent(event)
-        self.redimensionado.emit(self.width())
+        self.redimensionado.emit(self.viewport().width())
 
 
 # ---------------------------------------------------------------------------
@@ -284,14 +295,14 @@ class MainWindow(QWidget):
         return container
 
     def _criar_area_produtos(self) -> QScrollArea:
-        self.scroll_area = QScrollArea()
+        self.scroll_area = _AreaProdutosScrollArea()
         self.scroll_area.setWidgetResizable(True)
-
-        self.container_produtos = _AreaProdutosWidget()
-        self.container_produtos.redimensionado.connect(
-            self._ao_redimensionar_area_produtos
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
+        self.scroll_area.redimensionado.connect(self._ao_redimensionar_area_produtos)
 
+        self.container_produtos = QWidget()
         self.grid_layout = QGridLayout(self.container_produtos)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.grid_layout.setContentsMargins(28, 28, 28, 28)
