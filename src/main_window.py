@@ -52,36 +52,32 @@ from scoring import ProdutoOferta
 logger = logging.getLogger(__name__)
 
 CATEGORIA_TODAS = "Todas"
-COLUNAS_GRID = 3
+COLUNAS_GRID_INICIAL = 3  # chute inicial; corrigido no primeiro resize real
+TAMANHO_PAGINA = 50  # quantos cards existem como widget ao mesmo tempo
 
-# Quantos cards são efetivamente criados/renderizados de uma vez. Com
-# 2500+ produtos, criar um OfferCard por item (sombra + spinboxes +
-# download de imagem em thread) para TODOS de uma vez é o que estava
-# deixando a UI pesada. A paginação limita o grid a uma "página" por
-# vez — os filtros continuam rodando sobre a lista completa em memória,
-# só a criação de widgets é que passa a ser limitada.
-PRODUTOS_POR_PAGINA = 60
 
-# Usados tanto para montar o grid quanto para calcular a largura mínima
-# da janela logo abaixo — mantidos como constantes nomeadas (em vez de
-# números soltos em dois lugares) justamente para os dois cálculos nunca
-# ficarem dessincronizados.
-MARGEM_GRID = 28
-ESPACAMENTO_HORIZONTAL_GRID = 22
+# ---------------------------------------------------------------------------
+# Widget que avisa quando é redimensionado (usado pra recalcular colunas)
+# ---------------------------------------------------------------------------
 
-# Largura mínima/máxima da janela: trava exatamente no ponto que garante
-# as 3 colunas completas (nunca menos), sem permitir que o usuário
-# arraste a borda e deixe os cards cortados. Some margens do grid + os
-# espaçamentos entre colunas + a largura de cada card + uma folga para a
-# scrollbar vertical (10px de largura, ver ESTILO_APP em main.py) e para
-# a borda/moldura da própria janela do SO.
-FOLGA_SCROLLBAR_E_MOLDURA = 24
-LARGURA_JANELA_FIXA = (
-    MARGEM_GRID * 2
-    + LARGURA_CARD * COLUNAS_GRID
-    + ESPACAMENTO_HORIZONTAL_GRID * (COLUNAS_GRID - 1)
-    + FOLGA_SCROLLBAR_E_MOLDURA
-)
+
+class _AreaProdutosWidget(QWidget):
+    """
+    QWidget comum, só que emite um sinal com a nova largura sempre que é
+    redimensionado. Como este widget é o próprio conteúdo do QScrollArea
+    (com setWidgetResizable(True)), sua largura é ajustada automaticamente
+    para acompanhar a largura visível da área rolável — então capturar o
+    resizeEvent DELE é a forma mais direta e confiável de saber quando a
+    largura disponível pro grid mudou (mais confiável do que capturar o
+    resize da janela principal, que pode disparar antes do layout interno
+    terminar de se ajustar).
+    """
+
+    redimensionado = Signal(int)  # nova largura, em pixels
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (nome exigido pelo Qt)
+        super().resizeEvent(event)
+        self.redimensionado.emit(self.width())
 
 
 # ---------------------------------------------------------------------------
@@ -132,12 +128,20 @@ class MainWindow(QWidget):
         # filtros trabalham sempre em cima desta lista, em memória.
         self.produtos: list[ProdutoOferta] = []
 
-        # Resultado do último filtro aplicado (busca/categoria/score) e a
-        # página atual dentro desse resultado. self.produtos pode ter
-        # milhares de itens; produtos_filtrados também pode — só a fatia
-        # da página atual vira widgets de fato (ver _renderizar_pagina_atual).
-        self.produtos_filtrados: list[ProdutoOferta] = []
-        self.pagina_atual: int = 0
+        # Estado do grid responsivo: quantas colunas cabem na largura
+        # atual, os cards já criados pra PÁGINA vigente (reaproveitados
+        # ao redimensionar — só reposicionados, nunca recriados) e o
+        # aviso de "lista vazia" quando aplicável.
+        self._colunas_atuais = COLUNAS_GRID_INICIAL
+        self._cards_atuais: list[OfferCard] = []
+        self._aviso_vazio: QLabel | None = None
+
+        # Estado de paginação: a lista FILTRADA completa fica em memória
+        # (leve — só dados, sem widgets), mas só os produtos da página
+        # atual viram OfferCard de verdade. Isso é o que resolve o app
+        # ficando pesado com milhares de produtos buscados de uma vez.
+        self._produtos_filtrados: list[ProdutoOferta] = []
+        self._pagina_atual = 1
 
         # Repassados para cada OfferCard: a lista de templates de legenda
         # (botão "Copiar texto" sorteia um a cada clique) e as fontes
@@ -152,10 +156,6 @@ class MainWindow(QWidget):
             "tabela_utilidade_por_categoria": oferta_service.tabela_utilidade_por_categoria,
             "tabela_facilidade_por_categoria": oferta_service.tabela_facilidade_por_categoria,
         }
-        # Mapeamento categoria_id -> nome (ver data_service.py). Categorias
-        # sem entrada aqui continuam aparecendo no filtro, só que como
-        # "Categoria {id}" em vez de um nome legível.
-        self.nomes_categorias = oferta_service.nomes_categorias
 
         # Referências de thread/worker precisam ser guardadas na
         # instância, senão o Python coleta o objeto e a thread morre
@@ -165,14 +165,6 @@ class MainWindow(QWidget):
 
         self.setWindowTitle("Ofertas Shopee - Afiliados")
         self._montar_ui()
-
-        # Trava a LARGURA da janela em LARGURA_JANELA_FIXA (mínimo == máximo),
-        # o suficiente para as 3 colunas completas de cards — o usuário não
-        # consegue mais arrastar a borda e deixar cards cortados. A ALTURA
-        # continua livre: só setamos min/max de largura, não de altura.
-        self.setMinimumWidth(LARGURA_JANELA_FIXA)
-        self.setMaximumWidth(LARGURA_JANELA_FIXA)
-
         self._carregar_estado_inicial()
 
     # ------------------------------------------------------------------
@@ -186,8 +178,8 @@ class MainWindow(QWidget):
 
         layout_principal.addWidget(self._criar_banner_erro())
         layout_principal.addWidget(self._criar_cabecalho())
-        layout_principal.addWidget(self._criar_area_produtos())
-        layout_principal.addWidget(self._criar_barra_paginacao())
+        layout_principal.addWidget(self._criar_area_produtos(), 1)
+        layout_principal.addWidget(self._criar_rodape_paginacao())
 
     def _criar_banner_erro(self) -> QWidget:
         self.banner_erro = QLabel("")
@@ -273,7 +265,7 @@ class MainWindow(QWidget):
 
         layout.addWidget(QLabel("🏷 Categoria:"))
         self.combo_categoria = QComboBox()
-        self.combo_categoria.addItem(CATEGORIA_TODAS, None)
+        self.combo_categoria.addItem(CATEGORIA_TODAS)
         self.combo_categoria.currentIndexChanged.connect(
             self._aplicar_filtros_e_renderizar
         )
@@ -295,39 +287,64 @@ class MainWindow(QWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
 
-        self.container_produtos = QWidget()
+        self.container_produtos = _AreaProdutosWidget()
+        self.container_produtos.redimensionado.connect(
+            self._ao_redimensionar_area_produtos
+        )
+
         self.grid_layout = QGridLayout(self.container_produtos)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.grid_layout.setContentsMargins(
-            MARGEM_GRID, MARGEM_GRID, MARGEM_GRID, MARGEM_GRID
-        )
-        self.grid_layout.setHorizontalSpacing(ESPACAMENTO_HORIZONTAL_GRID)
+        self.grid_layout.setContentsMargins(28, 28, 28, 28)
+        self.grid_layout.setHorizontalSpacing(22)
         self.grid_layout.setVerticalSpacing(22)
 
         self.scroll_area.setWidget(self.container_produtos)
         return self.scroll_area
 
-    def _criar_barra_paginacao(self) -> QWidget:
+    def _calcular_colunas(self, largura_disponivel: int) -> int:
         """
-        Barra fixa embaixo do grid: "‹ Anterior | Página X de Y (N produtos) | Próxima ›".
-        Mesma família visual do cabeçalho (fundo claro + borda fina).
+        Quantas colunas de cards (largura fixa LARGURA_CARD) cabem na
+        largura disponível, considerando as margens do grid e o
+        espaçamento horizontal entre cards.
+        """
+        margens = self.grid_layout.contentsMargins()
+        margens_horizontais = margens.left() + margens.right()
+        espacamento = self.grid_layout.horizontalSpacing()
+
+        largura_util = largura_disponivel - margens_horizontais + espacamento
+        colunas = largura_util // (LARGURA_CARD + espacamento)
+        return max(1, int(colunas))
+
+    def _ao_redimensionar_area_produtos(self, largura: int) -> None:
+        novas_colunas = self._calcular_colunas(largura)
+        if novas_colunas != self._colunas_atuais:
+            self._colunas_atuais = novas_colunas
+            self._reposicionar_cards()
+
+    def _criar_rodape_paginacao(self) -> QWidget:
+        """
+        Rodapé com navegação Anterior/Próxima — mostra só TAMANHO_PAGINA
+        cards por vez, para o app continuar leve mesmo com milhares de
+        produtos buscados.
         """
         container = QFrame()
-        container.setObjectName("barraPaginacao")
+        container.setObjectName("rodapePaginacao")
         container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         container.setStyleSheet(
             """
-            #barraPaginacao {
+            #rodapePaginacao {
                 background-color: #FFFDFE;
                 border-top: 1px solid #F3D9E3;
+            }
+            #rodapePaginacao QLabel {
+                color: #8A7680;
+                font-weight: 500;
             }
             """
         )
 
         layout = QHBoxLayout(container)
         layout.setContentsMargins(20, 10, 20, 10)
-        layout.setSpacing(14)
-
         layout.addStretch()
 
         self.botao_pagina_anterior = QPushButton("‹  Anterior")
@@ -335,16 +352,15 @@ class MainWindow(QWidget):
         self.botao_pagina_anterior.clicked.connect(self._ir_pagina_anterior)
         layout.addWidget(self.botao_pagina_anterior)
 
-        self.label_pagina_info = QLabel("Página 1 de 1")
-        self.label_pagina_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label_pagina_info.setMinimumWidth(220)
-        self.label_pagina_info.setStyleSheet("color: #8A7680; font-weight: 500;")
-        layout.addWidget(self.label_pagina_info)
+        self.label_pagina = QLabel("Página 1 de 1")
+        self.label_pagina.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label_pagina.setMinimumWidth(240)
+        layout.addWidget(self.label_pagina)
 
-        self.botao_pagina_proxima = QPushButton("Próxima  ›")
-        self.botao_pagina_proxima.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.botao_pagina_proxima.clicked.connect(self._ir_pagina_seguinte)
-        layout.addWidget(self.botao_pagina_proxima)
+        self.botao_proxima_pagina = QPushButton("Próxima  ›")
+        self.botao_proxima_pagina.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.botao_proxima_pagina.clicked.connect(self._ir_proxima_pagina)
+        layout.addWidget(self.botao_proxima_pagina)
 
         layout.addStretch()
         return container
@@ -436,15 +452,12 @@ class MainWindow(QWidget):
         presentes em self.produtos. Tenta preservar a seleção atual, se
         ela ainda existir na nova lista.
 
-        A API só devolve productCatIds (números) — não existe nome de
-        categoria vindo da Shopee. Por isso usamos self.nomes_categorias
-        (mapeamento local, ver data_service.py) para mostrar um nome
-        legível quando disponível; categorias ainda não mapeadas caem no
-        fallback "Categoria {id}". Em qualquer caso, o ID de verdade fica
-        guardado como itemData do combo (não no texto), então a
-        filtragem nunca depende de parsear o texto exibido.
+        NOTA: a API só devolve productCatIds (números). Não temos, por
+        enquanto, um mapeamento de categoria_id -> nome legível — o combo
+        mostra os IDs mesmo. Se você tiver (ou conseguir) uma tabela de
+        nomes de categoria da Shopee, dá pra plugar aqui facilmente.
         """
-        selecao_atual = self.combo_categoria.currentData()
+        selecao_atual = self.combo_categoria.currentText()
 
         categorias_presentes: set[int] = set()
         for produto in self.produtos:
@@ -452,13 +465,11 @@ class MainWindow(QWidget):
 
         self.combo_categoria.blockSignals(True)
         self.combo_categoria.clear()
-        self.combo_categoria.addItem(CATEGORIA_TODAS, None)
+        self.combo_categoria.addItem(CATEGORIA_TODAS)
         for categoria_id in sorted(categorias_presentes):
-            nome = self.nomes_categorias.get(categoria_id)
-            texto = f"{nome} ({categoria_id})" if nome else f"Categoria {categoria_id}"
-            self.combo_categoria.addItem(texto, categoria_id)
+            self.combo_categoria.addItem(str(categoria_id))
 
-        indice_previo = self.combo_categoria.findData(selecao_atual)
+        indice_previo = self.combo_categoria.findText(selecao_atual)
         self.combo_categoria.setCurrentIndex(indice_previo if indice_previo >= 0 else 0)
         self.combo_categoria.blockSignals(False)
 
@@ -468,7 +479,7 @@ class MainWindow(QWidget):
 
     def _aplicar_filtros_e_renderizar(self) -> None:
         texto_busca = self.campo_busca.text().strip().lower()
-        categoria_id_selecionada = self.combo_categoria.currentData()  # None = "Todas"
+        categoria_selecionada = self.combo_categoria.currentText()
         score_minimo = self.spin_score_minimo.value()
 
         produtos_filtrados = []
@@ -476,86 +487,128 @@ class MainWindow(QWidget):
             if texto_busca and texto_busca not in produto.nome.lower():
                 continue
 
-            if (
-                categoria_id_selecionada is not None
-                and categoria_id_selecionada not in produto.categoria_ids
-            ):
-                continue
+            if categoria_selecionada != CATEGORIA_TODAS:
+                try:
+                    categoria_id = int(categoria_selecionada)
+                except ValueError:
+                    categoria_id = None
+                if categoria_id not in produto.categoria_ids:
+                    continue
 
             if (produto.score_final or 0.0) < score_minimo:
                 continue
 
             produtos_filtrados.append(produto)
 
-        self.produtos_filtrados = produtos_filtrados
-        # Qualquer mudança de filtro volta para a primeira página — não
-        # faria sentido manter "página 8" de um filtro que agora só tem
-        # 2 produtos.
-        self.pagina_atual = 0
+        # Mudou o filtro -> o conjunto de resultados é outro, então volta
+        # pra página 1 (uma página 7 antiga pode nem existir mais no novo
+        # conjunto filtrado).
+        self._produtos_filtrados = produtos_filtrados
+        self._pagina_atual = 1
         self._renderizar_pagina_atual()
 
     # ------------------------------------------------------------------
-    # Paginação
+    # Paginação da exibição (independente da paginação da busca na API)
     # ------------------------------------------------------------------
 
     def _total_paginas(self) -> int:
-        if not self.produtos_filtrados:
+        if not self._produtos_filtrados:
             return 1
-        return -(-len(self.produtos_filtrados) // PRODUTOS_POR_PAGINA)  # ceil
-
-    def _ir_pagina_anterior(self) -> None:
-        if self.pagina_atual > 0:
-            self.pagina_atual -= 1
-            self._renderizar_pagina_atual()
-
-    def _ir_pagina_seguinte(self) -> None:
-        if self.pagina_atual < self._total_paginas() - 1:
-            self.pagina_atual += 1
-            self._renderizar_pagina_atual()
+        return -(-len(self._produtos_filtrados) // TAMANHO_PAGINA)  # ceil sem importar math
 
     def _renderizar_pagina_atual(self) -> None:
         """
-        Fatia produtos_filtrados na página atual e só então cria os
-        OfferCard dessa fatia — é isso que limita o número de widgets
-        vivos ao mesmo tempo (PRODUTOS_POR_PAGINA), em vez de recriar um
-        card para cada um dos milhares de produtos filtrados.
+        Recorta só a fatia da página atual da lista filtrada completa e
+        manda criar cards SÓ para ela — é isso que mantém o app leve
+        mesmo com milhares de produtos filtrados, já que nunca existem
+        mais que TAMANHO_PAGINA cards como widget ao mesmo tempo.
         """
         total_paginas = self._total_paginas()
-        self.pagina_atual = max(0, min(self.pagina_atual, total_paginas - 1))
+        self._pagina_atual = max(1, min(self._pagina_atual, total_paginas))
 
-        inicio = self.pagina_atual * PRODUTOS_POR_PAGINA
-        fim = inicio + PRODUTOS_POR_PAGINA
-        pagina = self.produtos_filtrados[inicio:fim]
+        inicio = (self._pagina_atual - 1) * TAMANHO_PAGINA
+        fim = inicio + TAMANHO_PAGINA
+        produtos_da_pagina = self._produtos_filtrados[inicio:fim]
 
-        self._renderizar_grid(pagina)
+        self._renderizar_grid(produtos_da_pagina)
+        self._atualizar_rodape_paginacao(total_paginas)
 
-        total_produtos = len(self.produtos_filtrados)
-        self.label_pagina_info.setText(
-            f"Página {self.pagina_atual + 1} de {total_paginas} "
-            f"({total_produtos} produtos)"
-        )
-        self.botao_pagina_anterior.setEnabled(self.pagina_atual > 0)
-        self.botao_pagina_proxima.setEnabled(self.pagina_atual < total_paginas - 1)
-
-        # Volta o scroll pro topo a cada troca de página — sem isso, ao
-        # ir para a página 2, o usuário abriria já rolado como se ainda
-        # estivesse na posição de scroll da página anterior.
+        # Volta o scroll pro topo ao trocar de página — sem isso, trocar
+        # de página com o scroll lá embaixo deixaria o usuário perdido.
         self.scroll_area.verticalScrollBar().setValue(0)
 
+    def _atualizar_rodape_paginacao(self, total_paginas: int) -> None:
+        total_produtos = len(self._produtos_filtrados)
+        if total_produtos == 0:
+            self.label_pagina.setText("Nenhum produto")
+        else:
+            inicio = (self._pagina_atual - 1) * TAMANHO_PAGINA + 1
+            fim = min(self._pagina_atual * TAMANHO_PAGINA, total_produtos)
+            self.label_pagina.setText(
+                f"{inicio}-{fim} de {total_produtos}  ·  "
+                f"Página {self._pagina_atual} de {total_paginas}"
+            )
+
+        self.botao_pagina_anterior.setEnabled(self._pagina_atual > 1)
+        self.botao_proxima_pagina.setEnabled(self._pagina_atual < total_paginas)
+
+    def _ir_pagina_anterior(self) -> None:
+        if self._pagina_atual > 1:
+            self._pagina_atual -= 1
+            self._renderizar_pagina_atual()
+
+    def _ir_proxima_pagina(self) -> None:
+        if self._pagina_atual < self._total_paginas():
+            self._pagina_atual += 1
+            self._renderizar_pagina_atual()
+
     def _renderizar_grid(self, produtos: list[ProdutoOferta]) -> None:
+        """
+        Reconstrói o conjunto de cards do zero — chamado quando o filtro
+        (busca/categoria/score) muda, ou seja, quando o CONJUNTO de
+        produtos exibidos realmente é outro. Redimensionar a janela NÃO
+        passa por aqui (ver _reposicionar_cards).
+        """
         self._limpar_grid()
 
         if not produtos:
-            aviso = QLabel("Nenhum produto encontrado para os filtros atuais.")
-            aviso.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            aviso.setStyleSheet("color: #C7A7B4; font-size: 12pt; padding: 40px;")
-            self.grid_layout.addWidget(aviso, 0, 0, 1, COLUNAS_GRID)
+            self._aviso_vazio = QLabel(
+                "Nenhum produto encontrado para os filtros atuais."
+            )
+            self._aviso_vazio.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._aviso_vazio.setStyleSheet(
+                "color: #C7A7B4; font-size: 12pt; padding: 40px;"
+            )
+            self._cards_atuais = []
+            self._reposicionar_cards()
             return
 
-        for indice, produto in enumerate(produtos):
-            linha = indice // COLUNAS_GRID
-            coluna = indice % COLUNAS_GRID
-            card = self._criar_card(produto)
+        self._cards_atuais = [self._criar_card(produto) for produto in produtos]
+        self._reposicionar_cards()
+
+    def _reposicionar_cards(self) -> None:
+        """
+        Rearranja os widgets JÁ EXISTENTES (cards ou o aviso de lista
+        vazia) no grid, de acordo com self._colunas_atuais — sem recriar
+        nada. É isso que roda a cada redimensionamento da janela: barato
+        (só reposiciona), diferente de _renderizar_grid (que recria os
+        cards e dispararia novos carregamentos de imagem à toa).
+
+        QGridLayout.takeAt() remove o item do LAYOUT, mas não deleta o
+        widget — é por isso que os cards sobrevivem a essa operação.
+        """
+        while self.grid_layout.count():
+            self.grid_layout.takeAt(0)
+
+        if self._aviso_vazio is not None:
+            self.grid_layout.addWidget(
+                self._aviso_vazio, 0, 0, 1, self._colunas_atuais
+            )
+            return
+
+        for indice, card in enumerate(self._cards_atuais):
+            linha = indice // self._colunas_atuais
+            coluna = indice % self._colunas_atuais
             self.grid_layout.addWidget(card, linha, coluna)
 
     def _limpar_grid(self) -> None:
@@ -564,6 +617,8 @@ class MainWindow(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
+        self._cards_atuais = []
+        self._aviso_vazio = None
 
     def _criar_card(self, produto: ProdutoOferta) -> QWidget:
         return OfferCard(
@@ -582,3 +637,20 @@ class MainWindow(QWidget):
         # — o filtro só é reaplicado na próxima busca/categoria/score
         # alterados manualmente ou na próxima atualização geral.
         pass
+
+    # ------------------------------------------------------------------
+    # Encerramento seguro
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        if self._thread is not None and self._thread.isRunning():
+            logger.info(
+                "Fechando com atualização em andamento — aguardando thread encerrar."
+            )
+            self._thread.requestInterruption()
+            self._thread.quit()
+            if not self._thread.wait(5000):
+                logger.warning("Thread não encerrou em 5s — terminate() forçado.")
+                self._thread.terminate()
+                self._thread.wait()
+        event.accept()

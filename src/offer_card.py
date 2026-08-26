@@ -31,6 +31,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPixmap
+from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QGraphicsDropShadowEffect,
@@ -53,7 +54,7 @@ from whatsapp_export import (
     gerar_legenda,
 )
 
-LARGURA_CARD = 300
+LARGURA_CARD = 220
 ALTURA_IMAGEM = 160
 DURACAO_FEEDBACK_MS = 2000
 
@@ -103,29 +104,6 @@ class _TarefaCarregarImagem(QRunnable):
             return
 
         self.sinais.concluido.emit(dados)
-
-
-# ---------------------------------------------------------------------------
-# QDoubleSpinBox sem scroll acidental
-# ---------------------------------------------------------------------------
-
-
-class _SpinBoxSemScrollAcidental(QDoubleSpinBox):
-    """
-    QDoubleSpinBox padrão muda de valor ao passar o scroll do mouse por
-    cima, mesmo sem o campo estar focado — problema real ao rolar o
-    grid de produtos e sem querer alterar Utilidade/Facilidade de algum
-    card pelo caminho. Esta subclasse ignora o evento de scroll a menos
-    que o spinbox já esteja com foco (ou seja, o usuário clicou nele
-    antes) — clique + scroll continuam funcionando normalmente, só o
-    "scroll de passagem" é que não altera mais o valor.
-    """
-
-    def wheelEvent(self, event) -> None:
-        if not self.hasFocus():
-            event.ignore()
-            return
-        super().wheelEvent(event)
 
 
 # ---------------------------------------------------------------------------
@@ -381,14 +359,10 @@ class OfferCard(QWidget):
         return linha
 
     def _criar_spin_manual(self, valor_atual: float | None) -> QDoubleSpinBox:
-        spin = _SpinBoxSemScrollAcidental()
+        spin = QDoubleSpinBox()
         spin.setRange(0.0, 10.0)
         spin.setSingleStep(0.5)
         spin.setDecimals(1)
-        # Clique (ou Tab) dá foco; o scroll do mouse, por si só, NÃO deve
-        # dar foco — senão o primeiro "scroll de passagem" já contaria
-        # como focado e mudaria o valor mesmo sem clique algum.
-        spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # Bloqueia sinais ao definir o valor inicial: não queremos que
         # simplesmente exibir o card já dispare um recálculo de score.
         spin.blockSignals(True)
@@ -510,8 +484,13 @@ class OfferCard(QWidget):
     def _concluir_feedback_botao(
         self, botao: QPushButton, texto_temporario: str, texto_original: str
     ) -> None:
+        if not isValid(botao):
+            return
         botao.setEnabled(True)
         botao.setText(texto_temporario)
-        QTimer.singleShot(
-            DURACAO_FEEDBACK_MS, lambda: botao.setText(texto_original)
-        )
+
+        def _restaurar():
+            if isValid(botao):
+                botao.setText(texto_original)
+
+        QTimer.singleShot(DURACAO_FEEDBACK_MS, _restaurar)
