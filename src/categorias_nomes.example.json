@@ -1,0 +1,6 @@
+{
+  "_comentario": "Renomeie este arquivo para categorias_nomes.json e coloque-o em cache/. Formato: \"id_da_categoria\": \"Nome legível\". A Shopee Affiliate API não devolve nomes de categoria, só os IDs numéricos (productCatIds) — por isso esse mapeamento é preenchido manualmente. Uma forma de descobrir o nome de um ID: navegue por categorias em shopee.com.br e observe o número '...-cat.XXXXXXXX' na URL da categoria que corresponde ao ID que você quer nomear. IDs sem entrada aqui continuam funcionando no filtro normalmente, só aparecem como 'Categoria {id}'.",
+
+  "100629": "Eletrônicos (exemplo — confirme o ID real antes de usar)",
+  "100636": "Beleza e Cuidado Pessoal (exemplo — confirme o ID real antes de usar)"
+}

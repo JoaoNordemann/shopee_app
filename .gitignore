@@ -1,0 +1,8 @@
+/.env
+/.pytest_cache
+/.venv
+/assets
+/cache
+/dist
+/logs
+/requirements.txt
