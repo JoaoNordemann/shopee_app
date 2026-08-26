@@ -27,6 +27,7 @@ otimização para manter o código simples.
 
 from __future__ import annotations
 
+import html
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -253,7 +254,7 @@ class OfferCard(QWidget):
 
     def _criar_label_nome(self) -> QLabel:
         self.label_nome = QLabel()
-        self.label_nome.setToolTip(self.produto.nome)
+        self.label_nome.setToolTip(html.escape(self.produto.nome))
         self.label_nome.setWordWrap(False)
         self._atualizar_texto_nome_truncado()
         return self.label_nome
@@ -264,7 +265,15 @@ class OfferCard(QWidget):
         texto_truncado = metrics.elidedText(
             self.produto.nome, Qt.TextElideMode.ElideRight, largura_disponivel
         )
-        self.label_nome.setText(texto_truncado)
+        # Sanitização: escapa <, >, & antes de virar texto do QLabel. Sem
+        # isso, um nome de produto "sujo" vindo da API contendo esses
+        # caracteres poderia ser interpretado como HTML pelo QLabel
+        # (autodetecção de rich text) e quebrar o layout do card.
+        # setTextFormat(RichText) explícito garante que as entidades
+        # escapadas (&amp;, &lt; etc.) sejam exibidas como os caracteres
+        # originais, e não como texto literal "&amp;".
+        self.label_nome.setTextFormat(Qt.TextFormat.RichText)
+        self.label_nome.setText(html.escape(texto_truncado))
         self.label_nome.setStyleSheet(
             "color: #4A4A4A; font-weight: 600; font-size: 11pt; "
             'font-family: "Poppins", "Montserrat", "Segoe UI"; '

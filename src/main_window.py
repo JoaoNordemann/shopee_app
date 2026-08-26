@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 CATEGORIA_TODAS = "Todas"
 COLUNAS_GRID_INICIAL = 3  # chute inicial; corrigido no primeiro resize real
 TAMANHO_PAGINA = 50  # quantos cards existem como widget ao mesmo tempo
+DEBOUNCE_BUSCA_MS = 350  # atraso após a última tecla antes de filtrar
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +175,13 @@ class MainWindow(QWidget):
         self._thread: QThread | None = None
         self._worker: _AtualizarOfertasWorker | None = None
 
+        # Debounce da busca por texto: reinicia a cada tecla digitada,
+        # só filtra de fato quando o usuário pausa por DEBOUNCE_BUSCA_MS
+        # — evita refiltrar a lista inteira a cada caractere digitado.
+        self._timer_debounce_busca = QTimer(self)
+        self._timer_debounce_busca.setSingleShot(True)
+        self._timer_debounce_busca.timeout.connect(self._aplicar_filtros_e_renderizar)
+
         self.setWindowTitle("Ofertas Shopee - Afiliados")
         self._montar_ui()
         self._carregar_estado_inicial()
@@ -271,7 +279,7 @@ class MainWindow(QWidget):
         self.campo_busca = QLineEdit()
         self.campo_busca.setPlaceholderText("Nome do produto...")
         self.campo_busca.setMinimumWidth(200)
-        self.campo_busca.textChanged.connect(self._aplicar_filtros_e_renderizar)
+        self.campo_busca.textChanged.connect(self._reiniciar_debounce_busca)
         layout.addWidget(self.campo_busca)
 
         layout.addWidget(QLabel("🏷 Categoria:"))
@@ -487,6 +495,9 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------
     # Filtragem em memória + renderização do grid
     # ------------------------------------------------------------------
+
+    def _reiniciar_debounce_busca(self) -> None:
+        self._timer_debounce_busca.start(DEBOUNCE_BUSCA_MS)
 
     def _aplicar_filtros_e_renderizar(self) -> None:
         texto_busca = self.campo_busca.text().strip().lower()

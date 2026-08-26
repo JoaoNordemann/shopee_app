@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -260,21 +261,36 @@ class OfertaService:
         return self.cache_dir / NOME_ARQUIVO_CACHE
 
     def _salvar_cache(self, produtos: list[ProdutoOferta]) -> None:
-        """Salva os produtos no cache JSON local, com timestamp da atualização."""
+        """
+        Salva os produtos no cache JSON local, com timestamp da
+        atualização. Gravação ATÔMICA: escreve num arquivo temporário e
+        só então usa os.replace() para substituir o arquivo final — se o
+        app crashar/perder energia no meio da escrita, o cache_temp fica
+        incompleto mas o cache_ofertas.json original permanece intacto
+        (os.replace é atômico no nível do sistema operacional).
+        """
         conteudo = {
             "atualizado_em": datetime.now().isoformat(),
             "produtos": [asdict(p) for p in produtos],
         }
         caminho = self._caminho_cache()
+        caminho_temp = caminho.with_name(caminho.stem + "_temp" + caminho.suffix)
         try:
             caminho.parent.mkdir(parents=True, exist_ok=True)
-            with open(caminho, "w", encoding="utf-8") as f:
+            with open(caminho_temp, "w", encoding="utf-8") as f:
                 json.dump(conteudo, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(caminho_temp, caminho)
             logger.info("Cache salvo em %s (%d produtos).", caminho, len(produtos))
         except OSError as exc:
             # Falha ao salvar cache não deve impedir a UI de exibir os
             # dados que acabaram de ser buscados — só logamos o problema.
             logger.error("Não foi possível salvar o cache em %s: %s", caminho, exc)
+            try:
+                caminho_temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def carregar_do_cache(
         self, idade_maxima_minutos: int = IDADE_MAXIMA_CACHE_MINUTOS
