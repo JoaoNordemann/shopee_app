@@ -126,6 +126,29 @@ class _AtualizarOfertasWorker(QObject):
             self.concluido.emit(produtos)
 
 
+class _CarregarCacheWorker(QObject):
+    """
+    Executa OfertaService.carregar_do_cache() fora da thread principal.
+    Ler e desserializar um cache JSON com milhares de produtos pode
+    levar tempo perceptível — isso não pode rodar no __init__ da
+    MainWindow (travaria a janela antes mesmo dela aparecer).
+    """
+
+    concluido = Signal(object)  # list[ProdutoOferta] | None
+
+    def __init__(self, oferta_service: OfertaService):
+        super().__init__()
+        self.oferta_service = oferta_service
+
+    def run(self) -> None:
+        try:
+            cache = self.oferta_service.carregar_do_cache()
+        except Exception:
+            logger.exception("Erro inesperado ao carregar cache.")
+            cache = None
+        self.concluido.emit(cache)
+
+
 # ---------------------------------------------------------------------------
 # Janela principal
 # ---------------------------------------------------------------------------
@@ -174,6 +197,8 @@ class MainWindow(QWidget):
         # antes de terminar.
         self._thread: QThread | None = None
         self._worker: _AtualizarOfertasWorker | None = None
+        self._thread_cache: QThread | None = None
+        self._worker_cache: _CarregarCacheWorker | None = None
 
         # Debounce da busca por texto: reinicia a cada tecla digitada,
         # só filtra de fato quando o usuário pausa por DEBOUNCE_BUSCA_MS
@@ -389,7 +414,33 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _carregar_estado_inicial(self) -> None:
-        cache = self.oferta_service.carregar_do_cache()
+        """
+        Lê o cache em background — a janela aparece imediatamente com um
+        aviso de "Carregando...", em vez de travar o __init__ esperando
+        o JSON (que pode ter milhares de produtos) ser lido e parseado.
+        """
+        self._mostrar_aviso_carregando_cache()
+
+        self._thread_cache = QThread()
+        self._worker_cache = _CarregarCacheWorker(self.oferta_service)
+        self._worker_cache.moveToThread(self._thread_cache)
+
+        self._thread_cache.started.connect(self._worker_cache.run)
+        self._worker_cache.concluido.connect(self._ao_cache_carregado)
+        self._worker_cache.concluido.connect(self._thread_cache.quit)
+        self._thread_cache.finished.connect(self._ao_finalizar_thread_cache)
+
+        self._thread_cache.start()
+
+    def _mostrar_aviso_carregando_cache(self) -> None:
+        aviso = QLabel("Carregando produtos salvos...")
+        aviso.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        aviso.setStyleSheet("color: #C7A7B4; font-size: 12pt; padding: 40px;")
+        self._aviso_vazio = aviso
+        self._cards_atuais = []
+        self._reposicionar_cards()
+
+    def _ao_cache_carregado(self, cache) -> None:
         if cache:
             logger.info("Abrindo com %d produtos do cache.", len(cache))
             self.produtos = cache
@@ -398,6 +449,14 @@ class MainWindow(QWidget):
         else:
             logger.info("Sem cache válido — disparando atualização inicial.")
             self._iniciar_atualizacao()
+
+    def _ao_finalizar_thread_cache(self) -> None:
+        if self._worker_cache is not None:
+            self._worker_cache.deleteLater()
+        if self._thread_cache is not None:
+            self._thread_cache.deleteLater()
+        self._worker_cache = None
+        self._thread_cache = None
 
     # ------------------------------------------------------------------
     # Atualização (QThread)
@@ -665,14 +724,15 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        if self._thread is not None and self._thread.isRunning():
-            logger.info(
-                "Fechando com atualização em andamento — aguardando thread encerrar."
-            )
-            self._thread.requestInterruption()
-            self._thread.quit()
-            if not self._thread.wait(5000):
-                logger.warning("Thread não encerrou em 5s — terminate() forçado.")
-                self._thread.terminate()
-                self._thread.wait()
+        for thread in (self._thread, self._thread_cache):
+            if thread is not None and thread.isRunning():
+                logger.info(
+                    "Fechando com operação em andamento — aguardando thread encerrar."
+                )
+                thread.requestInterruption()
+                thread.quit()
+                if not thread.wait(5000):
+                    logger.warning("Thread não encerrou em 5s — terminate() forçado.")
+                    thread.terminate()
+                    thread.wait()
         event.accept()

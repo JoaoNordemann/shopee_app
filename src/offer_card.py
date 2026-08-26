@@ -28,6 +28,8 @@ otimização para manter o código simples.
 from __future__ import annotations
 
 import html
+import logging
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
@@ -55,14 +57,91 @@ from whatsapp_export import (
     gerar_legenda,
 )
 
+logger = logging.getLogger(__name__)
+
 LARGURA_CARD = 220
 ALTURA_IMAGEM = 160
 DURACAO_FEEDBACK_MS = 2000
+
+IDADE_MAXIMA_CACHE_IMAGENS_DIAS = 7
+TAMANHO_MAXIMO_CACHE_IMAGENS_MB = 200
 
 # Pool global compartilhado por todos os cards — evita criar uma
 # QThreadPool nova por card e limita downloads simultâneos.
 _POOL_IMAGENS = QThreadPool.globalInstance()
 _POOL_IMAGENS.setMaxThreadCount(6)
+
+
+def _limpar_cache_imagens_antigas() -> None:
+    """
+    Roda uma vez, na importação deste módulo: remove do cache/imagens/
+    arquivos com mais de IDADE_MAXIMA_CACHE_IMAGENS_DIAS dias, e, se
+    mesmo assim o cache continuar acima de TAMANHO_MAXIMO_CACHE_IMAGENS_MB,
+    apaga os arquivos mais antigos até caber no limite. Sem isso, o cache
+    de imagens cresce indefinidamente com uso contínuo do app.
+    """
+    pasta = config.CACHE_DIR / "imagens"
+    if not pasta.exists():
+        return
+
+    agora = time.time()
+    limite_idade_segundos = IDADE_MAXIMA_CACHE_IMAGENS_DIAS * 86400
+
+    try:
+        entradas = [item for item in pasta.iterdir() if item.is_file()]
+    except OSError as exc:
+        logger.warning("Não foi possível varrer %s para limpeza: %s", pasta, exc)
+        return
+
+    restantes: list[tuple[float, int, Path]] = []
+    removidos_por_idade = 0
+
+    for arquivo in entradas:
+        try:
+            info = arquivo.stat()
+        except OSError:
+            continue
+
+        idade_segundos = agora - info.st_mtime
+        if idade_segundos > limite_idade_segundos:
+            try:
+                arquivo.unlink()
+                removidos_por_idade += 1
+            except OSError:
+                pass
+        else:
+            restantes.append((info.st_mtime, info.st_size, arquivo))
+
+    if removidos_por_idade:
+        logger.info(
+            "Limpeza de cache de imagens: %d arquivo(s) removido(s) por TTL (>%dd).",
+            removidos_por_idade,
+            IDADE_MAXIMA_CACHE_IMAGENS_DIAS,
+        )
+
+    tamanho_total_mb = sum(tamanho for _, tamanho, _ in restantes) / (1024 * 1024)
+    if tamanho_total_mb > TAMANHO_MAXIMO_CACHE_IMAGENS_MB:
+        restantes.sort(key=lambda item: item[0])  # mais antigos primeiro
+        removidos_por_tamanho = 0
+        for mtime, tamanho, arquivo in restantes:
+            if tamanho_total_mb <= TAMANHO_MAXIMO_CACHE_IMAGENS_MB:
+                break
+            try:
+                arquivo.unlink()
+                tamanho_total_mb -= tamanho / (1024 * 1024)
+                removidos_por_tamanho += 1
+            except OSError:
+                pass
+        if removidos_por_tamanho:
+            logger.info(
+                "Limpeza de cache de imagens: %d arquivo(s) removido(s) por "
+                "limite de tamanho (>%dMB).",
+                removidos_por_tamanho,
+                TAMANHO_MAXIMO_CACHE_IMAGENS_MB,
+            )
+
+
+_limpar_cache_imagens_antigas()
 
 
 # ---------------------------------------------------------------------------
