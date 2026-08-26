@@ -126,13 +126,20 @@ def gerar_legenda(produto: ProdutoOferta, template: str) -> str:
             desconto=desconto_formatado,
             link=link,
         )
-    except (KeyError, IndexError) as exc:
-        # Template mal formado (placeholder desconhecido, chave faltando
-        # etc.) não deve travar o app — cai para um formato mínimo seguro.
+    except (KeyError, IndexError, ValueError) as exc:
+        # Template mal formado (placeholder desconhecido, chave faltando,
+        # chaves desbalanceadas "{" sem par etc.) não deve travar o app —
+        # cai para um formato mínimo seguro.
         logger.error(
             "Template de legenda inválido (%s). Usando formato mínimo de fallback.",
             exc,
         )
+        return f"{nome}\nR$ {preco_formatado} ({desconto_formatado}% OFF)\n{link}"
+    except Exception as exc:
+        # Rede de segurança final: qualquer outra falha inesperada ao
+        # montar a legenda também cai no fallback, nunca escala pro
+        # sys.excepthook global por causa de uma ação de "copiar texto".
+        logger.exception("Erro inesperado ao gerar legenda: %s", exc)
         return f"{nome}\nR$ {preco_formatado} ({desconto_formatado}% OFF)\n{link}"
 
 

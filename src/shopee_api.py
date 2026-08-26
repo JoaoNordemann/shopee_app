@@ -180,6 +180,18 @@ class ShopeeAffiliateClient:
             logger.error("Erro inesperado de rede ao chamar a Shopee API: %s", exc)
             raise ShopeeApiError("Erro de rede ao falar com a Shopee.") from exc
 
+        if response.status_code == 429 and _tentativa <= MAX_TENTATIVAS_RATE_LIMIT:
+            espera_segundos = 2**_tentativa  # 2s, 4s, 8s
+            logger.warning(
+                "Rate limit da Shopee (HTTP 429). Tentativa %d/%d — "
+                "aguardando %ds antes de tentar de novo.",
+                _tentativa,
+                MAX_TENTATIVAS_RATE_LIMIT,
+                espera_segundos,
+            )
+            time.sleep(espera_segundos)
+            return self._post_graphql(query, variables, _tentativa=_tentativa + 1)
+
         if response.status_code != 200:
             logger.error(
                 "HTTP %s ao chamar a Shopee Affiliate API. Corpo: %s",
@@ -317,12 +329,28 @@ class ShopeeAffiliateClient:
         atingiu_teto_de_seguranca = True
 
         while pagina_atual <= max_paginas:
-            resultado = self.buscar_ofertas(
-                list_type=list_type,
-                sort_type=sort_type,
-                page=pagina_atual,
-                limit=limit,
-            )
+            try:
+                resultado = self.buscar_ofertas(
+                    list_type=list_type,
+                    sort_type=sort_type,
+                    page=pagina_atual,
+                    limit=limit,
+                )
+            except ShopeeApiError as exc:
+                # Conexão caiu / erro no meio da paginação: não descarta o
+                # que já foi buscado com sucesso até aqui — loga e devolve
+                # o parcial, em vez de propagar e perder tudo.
+                logger.error(
+                    "Falha ao buscar page=%s (listType=%s, sortType=%s): %s. "
+                    "Retornando %d itens já obtidos até aqui.",
+                    pagina_atual,
+                    list_type,
+                    sort_type,
+                    exc,
+                    len(todos_os_itens),
+                )
+                atingiu_teto_de_seguranca = False
+                break
 
             if not resultado.nodes:
                 logger.info(

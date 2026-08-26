@@ -73,19 +73,6 @@ ITENS_POR_PAGINA = 50  # limite REAL confirmado pela API (erro 11001 ao tentar m
 NOME_ARQUIVO_CACHE = "cache_ofertas.json"
 IDADE_MAXIMA_CACHE_MINUTOS = 30
 
-# Arquivo opcional, editado manualmente, com o mapeamento categoria_id ->
-# nome legível. A Shopee Affiliate API (productOfferV2) não devolve nome
-# de categoria — só os IDs numéricos em productCatIds — e não existe,
-# nesta API, nenhum endpoint tipo "listar categorias com nome" (isso só
-# existe na API de Seller/Partner, que usa OAuth por loja e não é
-# compatível com as credenciais de afiliado usadas aqui). Por isso o
-# mapeamento é local e mantido à mão: crie/edite
-# cache/categorias_nomes.json no formato:
-#     {"100629": "Eletrônicos", "100636": "Beleza"}
-# Categorias sem nome mapeado continuam funcionando normalmente no
-# filtro — a UI só mostra "Categoria {id}" pra elas.
-NOME_ARQUIVO_CATEGORIAS = "categorias_nomes.json"
-
 
 class OfertaService:
     """Serviço de alto nível consumido pela UI."""
@@ -98,7 +85,6 @@ class OfertaService:
         lista_garantias: dict | None = None,
         tabela_utilidade_por_categoria: dict | None = None,
         tabela_facilidade_por_categoria: dict | None = None,
-        nomes_categorias: dict | None = None,
     ):
         """
         client: instância já configurada de ShopeeAffiliateClient.
@@ -108,13 +94,6 @@ class OfertaService:
         prontos (lojas confiáveis, garantias, tabelas por categoria),
         basta não passar nada — os critérios correspondentes usam o
         valor neutro (5) automaticamente.
-
-        nomes_categorias: mapeamento categoria_id -> nome legível, usado
-        só pela UI para mostrar nomes em vez de IDs crus no filtro de
-        categoria. Se não for passado explicitamente, tentamos carregar
-        automaticamente de cache/categorias_nomes.json (ver
-        NOME_ARQUIVO_CATEGORIAS); se o arquivo não existir, fica {} e a
-        UI mostra "Categoria {id}" normalmente.
         """
         self.client = client
         self.cache_dir = cache_dir or config.CACHE_DIR
@@ -122,44 +101,6 @@ class OfertaService:
         self.lista_garantias = lista_garantias or {}
         self.tabela_utilidade_por_categoria = tabela_utilidade_por_categoria or {}
         self.tabela_facilidade_por_categoria = tabela_facilidade_por_categoria or {}
-        self.nomes_categorias = (
-            nomes_categorias
-            if nomes_categorias is not None
-            else self._carregar_nomes_categorias_do_arquivo()
-        )
-
-    def _carregar_nomes_categorias_do_arquivo(self) -> dict[int, str]:
-        """
-        Lê cache/categorias_nomes.json (ver NOME_ARQUIVO_CATEGORIAS), se
-        existir. Arquivo ausente ou corrompido não é erro fatal — só
-        significa "sem nomes mapeados ainda", e a UI cai no fallback de
-        mostrar o ID puro.
-        """
-        caminho = self.cache_dir / NOME_ARQUIVO_CATEGORIAS
-        if not caminho.exists():
-            return {}
-
-        try:
-            with open(caminho, "r", encoding="utf-8") as f:
-                bruto = json.load(f)
-        except (OSError, ValueError) as exc:
-            logger.warning(
-                "Não foi possível carregar nomes de categoria de %s: %s",
-                caminho,
-                exc,
-            )
-            return {}
-
-        nomes: dict[int, str] = {}
-        for chave, valor in bruto.items():
-            try:
-                nomes[int(chave)] = str(valor)
-            except (ValueError, TypeError):
-                # Chaves não numéricas (ex: um campo "_comentario" no
-                # arquivo de exemplo) são ignoradas em vez de derrubar o
-                # carregamento do restante do mapeamento.
-                continue
-        return nomes
 
     # ------------------------------------------------------------------
     # Busca + normalização + score
@@ -236,12 +177,27 @@ class OfertaService:
         itens_por_id: dict[int, dict] = {}
 
         for list_type, sort_type in COMBINACOES_BUSCA:
-            itens = self.client.buscar_varias_paginas(
-                list_type=list_type,
-                sort_type=sort_type,
-                max_paginas=PAGINAS_POR_COMBINACAO,
-                limit=ITENS_POR_PAGINA,
-            )
+            try:
+                itens = self.client.buscar_varias_paginas(
+                    list_type=list_type,
+                    sort_type=sort_type,
+                    max_paginas=PAGINAS_POR_COMBINACAO,
+                    limit=ITENS_POR_PAGINA,
+                )
+            except ShopeeApiError as exc:
+                # Uma combinação inteira falhou (ex: rede caiu antes da
+                # primeira página responder) — não descarta o que já foi
+                # acumulado das combinações anteriores, só loga e segue.
+                logger.error(
+                    "Falha na combinação listType=%s, sortType=%s: %s. "
+                    "Mantendo %d itens já obtidos de outras combinações.",
+                    list_type,
+                    sort_type,
+                    exc,
+                    len(itens_por_id),
+                )
+                continue
+
             for item in itens:
                 item_id = item.get("itemId")
                 if item_id is None:
