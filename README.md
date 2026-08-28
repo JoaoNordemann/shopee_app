@@ -1,25 +1,26 @@
 # Ofertas Shopee - Afiliados
 
-Aplicativo desktop em Python/PySide6 para gerenciar ofertas de afiliado da Shopee. Busca produtos via API GraphQL oficial de afiliados, calcula um score de rentabilidade ponderado para cada oferta, exibe os resultados em cards visuais e gera pacotes prontos (imagem + legenda) para divulgação no WhatsApp.
+Aplicativo desktop e bot autônomo em Python para gerenciar e divulgar ofertas de afiliado da Shopee. O sistema busca produtos via API GraphQL oficial, calcula um score de rentabilidade, exibe os resultados em uma interface gráfica e realiza postagens automatizadas em canais do WhatsApp.
 
 ## Funcionalidades
 
-- Busca automática de ofertas na Shopee Open API (Affiliate), com paginação completa e múltiplas combinações de categoria/ordenação
-- Cálculo de score de rentabilidade (0 a 10) combinando avaliação, volume de vendas, desconto, comissão, reputação da loja e critérios editáveis manualmente (utilidade e facilidade de conteúdo)
-- Grid de cards com imagem, preço, desconto, comissão e score, com filtro por texto, categoria e score mínimo
-- Paginação da exibição (50 itens por página) para manter a interface leve mesmo com milhares de produtos
-- Botões de compartilhamento: cópia de imagem e de legenda (com variação automática de texto) prontos para colar no WhatsApp
-- Cache local em JSON para abertura rápida sem depender da API a cada execução
-- Empacotamento em executável único via PyInstaller
+- **Motor de Ofertas:** Busca automática na Shopee Open API (Affiliate) com paginação completa e cálculo de score de rentabilidade (0 a 10) combinando avaliação, vendas, desconto, comissão e critérios manuais (utilidade e facilidade de conteúdo).
+- **Interface de Curadoria (UI):** Grid de cards com filtro por texto, categoria e score mínimo, paginação em memória e cache local (JSON) para inicialização rápida.
+- **Bot Autônomo para WhatsApp:** Integração via Playwright com sessão persistente, eliminando a necessidade de escanear o QR Code a cada uso.
+- **Postagem Otimizada em Texto:** Envio direto da legenda e link da oferta (sem anexo de imagens) via `pyperclip` (área de transferência) para evitar gargalos de lentidão e timeouts do WhatsApp Web.
+- **Agendamento Humanizado (Jitter):** Orquestração com `APScheduler` para distribuir postagens em horários aleatórios dentro de janelas predefinidas (08h-10h, 12h-14h e 19h-22h).
+- **Dias Especiais:** Lógica para aumentar o volume de envios e injetar gatilhos de escassez em dias de pagamento (dia 5) e datas duplas (ex: 9/9, 10/10).
+- **Controle Anti-Repetição:** Registro em cache (`bot_history.json`) para garantir que uma mesma oferta não seja divulgada duas vezes.
 
 ## Stack
 
 - Python 3.11+
 - PySide6 (interface gráfica)
-- requests (integração com a API)
-- Pillow (tratamento de imagem)
-- python-dotenv (configuração)
-- PyInstaller (empacotamento)
+- Playwright & APScheduler (automação web e agendamento)
+- requests & Pillow (integração de rede e manipulação de mídia)
+- pyperclip (transferência de texto)
+- python-dotenv (configurações locais)
+- PyInstaller (empacotamento executável)
 
 ## Configuração
 
@@ -29,9 +30,10 @@ Aplicativo desktop em Python/PySide6 para gerenciar ofertas de afiliado da Shope
    .venv\Scripts\activate      # Windows
    source .venv/bin/activate   # Linux/Mac
    ```
-2. Instale as dependências:
+2. Instale as dependências e o navegador do Playwright:
    ```bash
    pip install -r requirements.txt
+   playwright install chromium
    ```
 3. Copie `.env.example` para `.env` na raiz do projeto e preencha suas credenciais da Shopee Open API:
    ```
@@ -44,7 +46,13 @@ Aplicativo desktop em Python/PySide6 para gerenciar ofertas de afiliado da Shope
 
 ```bash
 cd src
-python main.py
+python src/main.py
+```
+
+## Uso bot autônomo de postagem (mantenha o terminal aberto):
+
+```bash
+python src/whatsapp_bot.py
 ```
 
 ## Empacotamento (.exe)
@@ -60,20 +68,22 @@ O executável gerado (`dist/ShopeeAfiliados.exe`) espera o arquivo `.env` na mes
 ```
 shopee_app/
 ├── .env                  # credenciais (não versionado)
-├── build.spec             # configuração do PyInstaller
+├── build.spec            # configuração do PyInstaller
 ├── requirements.txt
-├── assets/                # ícone do executável
-├── cache/                 # cache local (ofertas e imagens)
-├── logs/                  # logs de execução
+├── assets/               # ícone do executável
+├── cache/                # cache local (ofertas, histórico do bot e imagens)
+├── logs/                 # logs de execução
+├── playwright_profile/   # sessão persistente do WhatsApp Web (gerado automaticamente)
 └── src/
-    ├── main.py             # ponto de entrada
+    ├── main.py             # ponto de entrada da interface
+    ├── whatsapp_bot.py     # bot autônomo de postagem
     ├── config.py           # carregamento de configuração/.env
     ├── shopee_api.py       # cliente da API GraphQL
     ├── scoring.py          # modelo de cálculo de score
     ├── data_service.py     # orquestração de busca, score e cache
     ├── whatsapp_export.py  # geração de legenda e exportação
-    ├── main_window.py      # janela principal
-    ├── offer_card.py       # card de produto
+    ├── main_window.py      # janela principal (UI)
+    ├── offer_card.py       # card de produto (UI)
     └── theme.py            # paleta de cores da interface
 ```
 
