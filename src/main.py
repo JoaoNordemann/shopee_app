@@ -272,6 +272,13 @@ def main() -> None:
     janela.resize(1000, 700)
     janela.show()
 
+    # Fecha a splash screen do PyInstaller, se estiver em execução
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except ImportError:
+        pass
+
     logger.info("Janela principal exibida. Iniciando loop de eventos da UI.")
     sys.exit(app.exec())
 
