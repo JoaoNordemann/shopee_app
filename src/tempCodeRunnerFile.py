@@ -1,0 +1,1 @@
+scheduler.add_job(job_send_offer, 'date', run_date=datetime.now() + timedelta(seconds=10), args=[False])

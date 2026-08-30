@@ -20,10 +20,14 @@ configurado — veja o final da conversa para o passo a passo completo).
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from dotenv import load_dotenv
+from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+
+from config_dialog import ConfigDialog
 
 # BASE_DIR calculado de forma independente de config.py (este arquivo
 # está em src/, então um nível acima é a raiz do projeto) — assim o
@@ -209,6 +213,15 @@ def main() -> None:
     # Instalado logo após criar a QApplication: precisamos de uma
     # QApplication existente para QMessageBox funcionar corretamente.
     sys.excepthook = _excecao_nao_tratada
+
+    # Interceptação: carrega o .env e verifica se as credenciais existem ANTES de importar o config.py
+    load_dotenv(dotenv_path=BASE_DIR / ".env")
+
+    if not os.getenv("SHOPEE_APP_ID") or not os.getenv("SHOPEE_APP_SECRET"):
+        dialog = ConfigDialog()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            logger.info("Configuração cancelada. Encerrando.")
+            sys.exit(0)
 
     try:
         import config

@@ -25,11 +25,13 @@ carregadas.
 from __future__ import annotations
 
 import logging
+import os
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -42,52 +44,28 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QVBoxLayout,
     QWidget,
+    QTabWidget
 )
 
 import config
+from config_dialog import ConfigDialog
 from data_service import OfertaService, OfertaServiceError
 from offer_card import LARGURA_CARD, OfferCard
 from scoring import ProdutoOferta
+from automation_tab import AutomationTab
 
 logger = logging.getLogger(__name__)
 
 CATEGORIA_TODAS = "Todas"
-COLUNAS_GRID_INICIAL = 3  # chute inicial; corrigido no primeiro resize real
-TAMANHO_PAGINA = 50  # quantos cards existem como widget ao mesmo tempo
-DEBOUNCE_BUSCA_MS = 350  # atraso após a última tecla antes de filtrar
-
-
-# ---------------------------------------------------------------------------
-# QScrollArea que avisa quando é redimensionada (usado pra recalcular colunas)
-# ---------------------------------------------------------------------------
+COLUNAS_GRID_INICIAL = 3
+TAMANHO_PAGINA = 50
+DEBOUNCE_BUSCA_MS = 350
 
 
 class _AreaProdutosScrollArea(QScrollArea):
-    """
-    QScrollArea comum, só que emite um sinal com a largura do VIEWPORT
-    sempre que é redimensionada.
+    redimensionado = Signal(int)
 
-    IMPORTANTE (correção de bug): antes, a detecção de resize era feita
-    no widget de CONTEÚDO (dentro da área rolável). O problema é que,
-    com setWidgetResizable(True), o Qt não deixa o conteúdo encolher
-    abaixo do tamanho mínimo exigido pelo QGridLayout — e esse mínimo é
-    justamente "largura suficiente para as N colunas já colocadas".
-    Resultado: aumentar a janela funcionava (o conteúdo cresce livre),
-    mas diminuir não (o conteúdo ficava preso no mínimo da última
-    quantidade de colunas, então o resizeEvent nunca chegava a reportar
-    uma largura menor).
-
-    A correção é observar o resize do VIEWPORT da QScrollArea (a área
-    visível de verdade, controlada pela janela/layout externo — não pelo
-    conteúdo), que encolhe e cresce livremente independente do que está
-    dentro. A barra de rolagem horizontal fica desativada de propósito
-    (ver _criar_area_produtos) para nunca aparecer durante o instante de
-    recálculo de colunas.
-    """
-
-    redimensionado = Signal(int)  # nova largura do viewport, em pixels
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 (nome exigido pelo Qt)
+    def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self.redimensionado.emit(self.viewport().width())
 
@@ -98,13 +76,7 @@ class _AreaProdutosScrollArea(QScrollArea):
 
 
 class _AtualizarOfertasWorker(QObject):
-    """
-    Executa OfertaService.atualizar_ofertas() fora da thread principal.
-    Vive numa QThread própria (ver MainWindow._iniciar_atualizacao) para
-    que a chamada de rede não trave a interface.
-    """
-
-    concluido = Signal(list)  # list[ProdutoOferta]
+    concluido = Signal(list)
     falhou = Signal(str)
 
     def __init__(self, oferta_service: OfertaService):
@@ -119,22 +91,13 @@ class _AtualizarOfertasWorker(QObject):
             self.falhou.emit(str(exc))
         except Exception:
             logger.exception("Erro inesperado ao atualizar ofertas.")
-            self.falhou.emit(
-                "Ocorreu um erro inesperado ao atualizar as ofertas."
-            )
+            self.falhou.emit("Ocorreu um erro inesperado ao atualizar as ofertas.")
         else:
             self.concluido.emit(produtos)
 
 
 class _CarregarCacheWorker(QObject):
-    """
-    Executa OfertaService.carregar_do_cache() fora da thread principal.
-    Ler e desserializar um cache JSON com milhares de produtos pode
-    levar tempo perceptível — isso não pode rodar no __init__ da
-    MainWindow (travaria a janela antes mesmo dela aparecer).
-    """
-
-    concluido = Signal(object)  # list[ProdutoOferta] | None
+    concluido = Signal(object)
 
     def __init__(self, oferta_service: OfertaService):
         super().__init__()
@@ -220,10 +183,27 @@ class MainWindow(QWidget):
         layout_principal.setContentsMargins(0, 0, 0, 0)
         layout_principal.setSpacing(0)
 
-        layout_principal.addWidget(self._criar_banner_erro())
-        layout_principal.addWidget(self._criar_cabecalho())
-        layout_principal.addWidget(self._criar_area_produtos(), 1)
-        layout_principal.addWidget(self._criar_rodape_paginacao())
+        # Tab Widget Principal
+        self.abas_principais = QTabWidget()
+        
+        # Aba 1: Ofertas (conteúdo antigo da MainWindow)
+        self.aba_ofertas = QWidget()
+        layout_ofertas = QVBoxLayout(self.aba_ofertas)
+        layout_ofertas.setContentsMargins(0, 0, 0, 0)
+        layout_ofertas.setSpacing(0)
+        
+        layout_ofertas.addWidget(self._criar_banner_erro())
+        layout_ofertas.addWidget(self._criar_cabecalho())
+        layout_ofertas.addWidget(self._criar_area_produtos(), 1)
+        layout_ofertas.addWidget(self._criar_rodape_paginacao())
+        
+        self.abas_principais.addTab(self.aba_ofertas, "Curadoria de Ofertas")
+
+        # Aba 2: Automação WhatsApp
+        self.aba_automacao = AutomationTab()
+        self.abas_principais.addTab(self.aba_automacao, "Automação WhatsApp")
+
+        layout_principal.addWidget(self.abas_principais)
 
     def _criar_banner_erro(self) -> QWidget:
         self.banner_erro = QLabel("")
@@ -286,9 +266,13 @@ class MainWindow(QWidget):
         self.botao_atualizar.clicked.connect(self._iniciar_atualizacao)
         layout.addWidget(self.botao_atualizar)
 
-        # Indicador de carregamento (spinner indeterminado + texto).
+        self.botao_config = QPushButton("⚙ Configurações")
+        self.botao_config.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.botao_config.clicked.connect(self._abrir_configuracoes)
+        layout.addWidget(self.botao_config)
+
         self.progresso = QProgressBar()
-        self.progresso.setRange(0, 0)  # modo indeterminado ("busy")
+        self.progresso.setRange(0, 0)
         self.progresso.setFixedSize(80, 8)
         self.progresso.setTextVisible(False)
         self.progresso.setVisible(False)
@@ -326,6 +310,15 @@ class MainWindow(QWidget):
 
         layout.addStretch()
         return container
+
+    def _abrir_configuracoes(self) -> None:
+        dialog = ConfigDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.oferta_service.client.app_id = os.getenv("SHOPEE_APP_ID")
+            self.oferta_service.client.app_secret = os.getenv("SHOPEE_APP_SECRET")
+            import config
+            config.SHOPEE_APP_ID = os.getenv("SHOPEE_APP_ID")
+            config.SHOPEE_APP_SECRET = os.getenv("SHOPEE_APP_SECRET")
 
     def _criar_area_produtos(self) -> QScrollArea:
         self.scroll_area = _AreaProdutosScrollArea()
@@ -595,7 +588,7 @@ class MainWindow(QWidget):
     def _total_paginas(self) -> int:
         if not self._produtos_filtrados:
             return 1
-        return -(-len(self._produtos_filtrados) // TAMANHO_PAGINA)  # ceil sem importar math
+        return -(-len(self._produtos_filtrados) // TAMANHO_PAGINA)
 
     def _renderizar_pagina_atual(self) -> None:
         """
@@ -710,20 +703,10 @@ class MainWindow(QWidget):
         )
 
     def _ao_score_de_card_alterado(self, produto: ProdutoOferta) -> None:
-        # O produto é o mesmo objeto (mesma referência) que está em
-        # self.produtos, então o novo score já fica refletido ali sem
-        # nenhuma ação extra. Decisão de design: NÃO re-renderizamos o
-        # grid inteiro aqui, para o card não "sumir" da tela no meio da
-        # edição caso o novo score fique fora do filtro de score mínimo
-        # — o filtro só é reaplicado na próxima busca/categoria/score
-        # alterados manualmente ou na próxima atualização geral.
         pass
 
-    # ------------------------------------------------------------------
-    # Encerramento seguro
-    # ------------------------------------------------------------------
-
     def closeEvent(self, event) -> None:
+        # Finaliza gracefully as threads da UI
         for thread in (self._thread, self._thread_cache):
             if thread is not None and thread.isRunning():
                 logger.info(
@@ -735,4 +718,10 @@ class MainWindow(QWidget):
                     logger.warning("Thread não encerrou em 5s — terminate() forçado.")
                     thread.terminate()
                     thread.wait()
+                    
+        # Interrompe graciosamente o bot caso esteja rodando
+        if self.aba_automacao.bot_worker and self.aba_automacao.bot_worker.isRunning():
+            self.aba_automacao.bot_worker.stop()
+            self.aba_automacao.bot_worker.wait()
+            
         event.accept()
